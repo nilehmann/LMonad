@@ -4,7 +4,7 @@
 
 {-# LANGUAGE FlexibleInstances, FlexibleContexts, TypeFamilies #-}
 
--- Only trusted code should import this module. 
+-- Only trusted code should import this module.
 
 module LMonad.TCB (
         module Export
@@ -60,19 +60,21 @@ class ToLabel t l where
     toConfidentialityLabel :: t -> l
     toIntegrityLabel :: t -> l
 
--- Transformer monad that wraps the underlying monad and keeps track of information flow. 
+-- Transformer monad that wraps the underlying monad and keeps track of information flow.
 data (Label l, Monad m, LMonad m) => LMonadT l m a = LMonadT {
         lMonadTState :: (StateT (LState l) m a)
     }
 
 instance (Label l, LMonad m) => Monad (LMonadT l m) where
-    (LMonadT ma) >>= f = 
+    (LMonadT ma) >>= f =
         LMonadT $ ma >>= (lMonadTState . f)
         -- LMonadT $ do
         -- a <- ma
         -- let (LMonadT mb) = f a
         -- mb
     return = LMonadT . return
+
+instance (Label l, LMonad m) => MonadFail (LMonadT l m) where
     fail _ = LMonadT $ lift lFail
 
 instance (Label l, LMonad m, Functor m) => Functor (LMonadT l m) where
@@ -81,7 +83,7 @@ instance (Label l, LMonad m, Functor m) => Functor (LMonadT l m) where
 instance (Label l, LMonad m, Functor m) => Applicative (LMonadT l m) where
     pure = return
     (<*>) = ap
-    
+
 instance (Label l, LMonad m, MonadIO m) => MonadIO (LMonadT l m) where
     liftIO ma = lLift $ liftIO ma
 
@@ -93,7 +95,7 @@ instance (Label l, LMonad m, MonadThrow m) => MonadThrow (LMonadT l m) where
 
 newtype StMT l m a = StMT {unStMT :: StM (StateT (LState l) m) a}
 
--- TODO: This allows replay attacks. Ie, malicious code could reset the current label or clearance to a previous value. 
+-- TODO: This allows replay attacks. Ie, malicious code could reset the current label or clearance to a previous value.
 --     This is needed for Database.Persist.runPool
 instance (LMonad m, Label l, MonadBaseControl IO m) => MonadBaseControl IO (LMonadT l m) where
     -- newtype StM (LMonadT l m) a = StMT {unStMT :: StM (StateT (LState l) m) a}
@@ -106,19 +108,19 @@ instance (LMonad m, Label l) => Semigroup (LMonadT l m a) where
 
 instance (LMonad m, Label l, Monoid (m a)) => Monoid (LMonadT l m a) where
     mempty = lLift mempty
-    -- mappend a b = a >> b 
+    -- mappend a b = a >> b
 --    do
---        a' <- a 
+--        a' <- a
 --        b' <- b
 --        return $ mappend a b
-    
--- Runs the LMonad with bottom as the initial label and clearance. 
+
+-- Runs the LMonad with bottom as the initial label and clearance.
 runLMonad :: (Label l, LMonad m) => LMonadT l m a -> m a
-runLMonad (LMonadT lm) = 
+runLMonad (LMonadT lm) =
     let s = LState bottom bottom in
     evalStateT lm s
 
--- class LMonadTrans t where 
+-- class LMonadTrans t where
 --     lift :: (LMonad m) => m a -> t m a
 -- instance (Label l) => MonadTrans (LMonadT l) where
 --     -- lift :: (Monad m, LMonad m) => m a -> LMonadT l m a
@@ -154,7 +156,7 @@ canAlloc l = do
 guardAlloc :: (Label l, LMonad m) => l -> StateT (LState l) m ()
 guardAlloc l = do
     guard <- canAlloc l
-    unless guard $ 
+    unless guard $
         lift lFail
 
 canSetLabel :: (Label l, LMonad m) => l -> LMonadT l m Bool
@@ -216,7 +218,7 @@ label l a = LMonadT $ do
     guardAlloc l
     return $ Labeled l a
 
--- | Join the given label with the current label. 
+-- | Join the given label with the current label.
 -- Return the result if it can flow to the clearance.
 taintHelper :: (Label l, LMonad m) => l -> LMonadT l m (Maybe l)
 taintHelper l = do
@@ -226,7 +228,7 @@ taintHelper l = do
         return $ Just l'
     else
         return Nothing
-        
+
 unlabel :: (Label l, LMonad m) => Labeled l a -> LMonadT l m a
 unlabel l = do
     taintLabel $ labelOf l
@@ -246,7 +248,7 @@ labelOf :: Label l => Labeled l a -> l
 labelOf = labeledLabel
 
 -- TODO: I'm pretty sure this also differs from their semantics
--- Should this also be TCB? Could potentially leak via side channel since lifting might be allowed. 
+-- Should this also be TCB? Could potentially leak via side channel since lifting might be allowed.
 toLabeledTCB :: (Label l, LMonad m) => l -> LMonadT l m a -> LMonadT l m (Labeled l a)
 toLabeledTCB l ma = do
     oldLabel <- getCurrentLabel
@@ -269,4 +271,3 @@ instance (MonadUnliftIO m, Label l, LMonad m) => MonadUnliftIO (LMonadT l m) whe
     withRunInIO x = do
         s <- LMonadT get
         wrappedWithRunInIO lLift (flip evalStateT s . lMonadTState) x
-
