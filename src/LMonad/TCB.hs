@@ -4,7 +4,7 @@
 
 {-# LANGUAGE FlexibleInstances, FlexibleContexts, TypeFamilies #-}
 
--- Only trusted code should import this module. 
+-- Only trusted code should import this module.
 
 module LMonad.TCB (
         module Export
@@ -60,7 +60,11 @@ class Monad m => LMonad m where
 
 data Lattice = Top | Bottom
 
-data Label l => LState l = LState {
+-- data Label l => LState l = LState {
+--         _lStateLabel :: !l
+--       , _lStateClearance :: !l
+--     }
+data LState l = LState {
         _lStateLabel :: !l
       , _lStateClearance :: !l
     }
@@ -70,19 +74,21 @@ class ToLabel t l where
     toConfidentialityLabel :: t -> l
     toIntegrityLabel :: t -> l
 
--- Transformer monad that wraps the underlying monad and keeps track of information flow. 
-data (Label l, Monad m, LMonad m) => LMonadT l m a = LMonadT {
+-- Transformer monad that wraps the underlying monad and keeps track of information flow.
+data LMonadT l m a = LMonadT {
         lMonadTState :: (StateT (LState l) m a)
     }
 
 instance (Label l, LMonad m) => Monad (LMonadT l m) where
-    (LMonadT ma) >>= f = 
+    (LMonadT ma) >>= f =
         LMonadT $ ma >>= (lMonadTState . f)
         -- LMonadT $ do
         -- a <- ma
         -- let (LMonadT mb) = f a
         -- mb
     return = LMonadT . return
+
+instance (Label l, LMonad m) => MonadFail (LMonadT l m) where
     fail _ = LMonadT $ lift lFail
 
 instance (Label l, LMonad m, Functor m) => Functor (LMonadT l m) where
@@ -91,7 +97,7 @@ instance (Label l, LMonad m, Functor m) => Functor (LMonadT l m) where
 instance (Label l, LMonad m, Functor m) => Applicative (LMonadT l m) where
     pure = return
     (<*>) = ap
-    
+
 instance (Label l, LMonad m, MonadIO m) => MonadIO (LMonadT l m) where
     liftIO ma = lLift $ liftIO ma
 
@@ -103,7 +109,7 @@ instance (Label l, LMonad m, MonadThrow m) => MonadThrow (LMonadT l m) where
 
 newtype StMT l m a = StMT {unStMT :: StM (StateT (LState l) m) a}
 
--- TODO: This allows replay attacks. Ie, malicious code could reset the current label or clearance to a previous value. 
+-- TODO: This allows replay attacks. Ie, malicious code could reset the current label or clearance to a previous value.
 --     This is needed for Database.Persist.runPool
 instance (LMonad m, Label l, MonadBaseControl IO m) => MonadBaseControl IO (LMonadT l m) where
     -- newtype StM (LMonadT l m) a = StMT {unStMT :: StM (StateT (LState l) m) a}
@@ -111,26 +117,28 @@ instance (LMonad m, Label l, MonadBaseControl IO m) => MonadBaseControl IO (LMon
     liftBaseWith f = LMonadT $ liftBaseWith $ \run -> f $ liftM StMT . run . lMonadTState
     restoreM = LMonadT . restoreM . unStMT
 
+instance (LMonad m, Label l, Semigroup (m a)) => Semigroup (LMonadT l m a) where
+    a <> b = a >> b
+
 instance (LMonad m, Label l, Monoid (m a)) => Monoid (LMonadT l m a) where
     mempty = lLift mempty
-    mappend a b = a >> b 
 --    do
---        a' <- a 
+--        a' <- a
 --        b' <- b
 --        return $ mappend a b
-    
+
 -- Runs the LMonad with the given current label and clearance.
 runLMonadWith :: (Label l, LMonad m) => l -> l -> LMonadT l m a -> m a
-runLMonadWith label clearance (LMonadT lm) = 
+runLMonadWith label clearance (LMonadT lm) =
     evalStateT lm $ LState label clearance
 
--- Runs the LMonad with bottom as the initial label and clearance. 
+-- Runs the LMonad with bottom as the initial label and clearance.
 runLMonad :: (Label l, LMonad m) => LMonadT l m a -> m a
-runLMonad (LMonadT lm) = 
+runLMonad (LMonadT lm) =
     let s = LState bottom bottom in
     evalStateT lm s
 
--- class LMonadTrans t where 
+-- class LMonadTrans t where
 --     lift :: (LMonad m) => m a -> t m a
 -- instance (Label l) => MonadTrans (LMonadT l) where
 --     -- lift :: (Monad m, LMonad m) => m a -> LMonadT l m a
@@ -166,7 +174,7 @@ canAlloc l = do
 guardAlloc :: (Label l, LMonad m) => l -> StateT (LState l) m ()
 guardAlloc l = do
     guard <- canAlloc l
-    unless guard $ 
+    unless guard $
         lift lFail
 
 canSetLabel :: (Label l, LMonad m) => l -> LMonadT l m Bool
@@ -207,7 +215,7 @@ setClearanceTCB :: (Label l, LMonad m) => l -> StateT (LState l) m ()
 setClearanceTCB c = do
     (LState label _) <- get
     put $ LState label c
-    
+
 setClearance :: (Label l, LMonad m) => l -> LMonadT l m ()
 setClearance c = LMonadT $ do
     guardAlloc c
@@ -231,7 +239,7 @@ setCurrentLabelTCB l = do
     LMonadT $ put $ LState l c
 
 -- Labeled values.
-data Label l => Labeled l a = Labeled {
+data Labeled l a = Labeled {
         labeledLabel :: l
       , labeledValue :: a
     }
@@ -241,7 +249,7 @@ label l a = LMonadT $ do
     guardAlloc l
     return $ Labeled l a
 
--- | Join the given label with the current label. 
+-- | Join the given label with the current label.
 -- Return the result if it can flow to the clearance.
 taintHelper :: (Label l, LMonad m) => l -> LMonadT l m (Maybe l)
 taintHelper l = do
@@ -251,7 +259,7 @@ taintHelper l = do
         return $ Just l'
     else
         return Nothing
-        
+
 unlabel :: (Label l, LMonad m) => Labeled l a -> LMonadT l m a
 unlabel l = do
     taintLabel $ labelOf l
@@ -287,8 +295,8 @@ toLabeled l ma = do
     else
         LMonadT $ lift lFail
 
--- | Declassify a labeled value if the label joined with the current label can flow to the clearance. Does not raise the current label. 
--- Allows users to declassify the value if they have permission to read the value. 
+-- | Declassify a labeled value if the label joined with the current label can flow to the clearance. Does not raise the current label.
+-- Allows users to declassify the value if they have permission to read the value.
 declassifyTCB :: (Label l, LMonad m) => Labeled l a -> LMonadT l m a
 declassifyTCB l@(Labeled _ v) = do
     canRead <- canUnlabel l
@@ -297,10 +305,10 @@ declassifyTCB l@(Labeled _ v) = do
     else
         LMonadT $ lift lFail
 
--- | Declassify a labeled value without any checks. 
+-- | Declassify a labeled value without any checks.
 declassifyNoChecksTCB :: (Label l, LMonad m) => Labeled l a -> LMonadT l m a
 declassifyNoChecksTCB (Labeled _ v) = return v
-        
+
 swapBase :: (Label l, LMonad m, LMonad n) => (m (a,LState l) -> n (b,LState l)) -> LMonadT l m a -> LMonadT l n b
 swapBase f (LMonadT m) = LMonadT $ do
     prev <- get
